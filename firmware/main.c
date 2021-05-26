@@ -78,7 +78,7 @@ struct {
     int8_t msgBufOffs;        // Current offset into the buffer
     uint8_t msgBuf[16];       // Buffer holding the data bytes for the current message
     int8_t listenChannel;     // Channel to respond to (0-15, -1 for all)
-
+    int8_t clock;             // Current index of the 24PPQN clock beat (if any) 
 
 } midirx;
 
@@ -136,18 +136,22 @@ reset() {
 
 uint8_t
 midi_dataSize( uint8_t status ) {
-    uint8_t s;
+    uint8_t s =0;
 
     switch( status ) {
         case MIDI_ST_NOTEOFF:
         case MIDI_ST_NOTEON:
         case MIDI_ST_PPRESSURE:
-        case MIDI_ST_CC:
-        case MIDI_ST_PC:
         case MIDI_ST_CPRESSURE:
         case MIDI_ST_PBEND:
-        case MIDI_ST_SYS:
+        case MIDI_ST_CC:
             s =2;
+            break;
+        case MIDI_ST_PC:
+            s =1;
+            break;
+        case MIDI_ST_SYS:
+            break;
     };
     return s;
 }
@@ -163,6 +167,12 @@ midirx_noteOn( uint8_t note, uint8_t velocity ) {
 void
 midirx_noteOff( uint8_t note, uint8_t velocity ) {
     led( 0 );
+}
+
+void
+midirx_clock( uint8_t npulse ) {
+    // Advance the clock on 1/8 notes
+    if( npulse == 0 || npulse == 12 ) adv_clock();
 }
 
 void
@@ -199,13 +209,30 @@ midirx_msgComplete() {
 
 void
 midirx_sysRt( uint8_t data ) {
-
+    // System-wide realtime messages
+    switch( data ) {
+        case MIDI_SR_CLOCK:
+            if( ++midirx.clock == 24 ) midirx.clock =0;
+            midirx_clock( midirx.clock );
+            break;
+        case MIDI_SR_START:
+            break;
+        case MIDI_SR_CONTINUE:
+            break;
+        case MIDI_SR_STOP:
+            break;
+        // We don't implement these
+        case MIDI_SR_ACTIVE:
+        case MIDI_SR_RESET:
+            break;
+    }
 }
 
 void
 midirx_msg( uint8_t msg ) {
     if( (msg & MIDI_SYSRT_BITS) == MIDI_SYSRT_BITS ) {
         // System realtime message
+        midirx_sysRt( msg );
     } else if( msg & MIDI_STATUS_BIT ) {
         // Status message / message begin
         midirx.msgChannel = msg & 0xF;
