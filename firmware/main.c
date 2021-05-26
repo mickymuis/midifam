@@ -17,7 +17,7 @@
  * DIPSWITCH1           -> 7    PD3
  * DIPSWITCH2           -> 8    PD4
  * DIPSWITCH3 (LSB)     -> 9    PD5
- * BTTN0                -> 12   PB0
+ * SWITCH0              -> 12   PB0
  * TRIG0 (adv/clock)    -> 13   PB1
  * TRIG1 (run/stop)     -> 14   PB2
  * CV0 (MIDI velocity)  -> 15   PB3/OC1A
@@ -30,11 +30,58 @@
 #include <avr/io.h>
 #include <avr/interrupt.h>
 
-#define F_CPU 16000000UL
-#define TIM0_CLK F_CPU >> 3
-#define TIM1_CLK F_CPU
+#define F_CPU 16000000UL        // 16Mhz crystal is attached
+#define BAUD_UBRR 31            // Sets the BAUD rate to 31,250 bit/s on a 16Mhz (31) crystal (use 15 on 8Mhz)
+
+//#define TIM0_CLK F_CPU >> 3
+
+//#define TIM1_CLK F_CPU
 
 #include <util/delay.h>
+
+enum MIDI_STATUS {
+    MIDI_ST_NOTEOFF      = 0x8,
+    MIDI_ST_NOTEON       = 0x9,
+    MIDI_ST_PPRESSURE    = 0xA,
+    MIDI_ST_CC           = 0xB,
+    MIDI_ST_PC           = 0xC,
+    MIDI_ST_CPRESSURE    = 0xD,
+    MIDI_ST_PBEND        = 0xE,
+    MIDI_ST_SYS          = 0xF
+};
+
+enum MIDI_SYS_COMMON {
+    MIDI_SC_SYSEX_START  = 0xF0,
+    MIDI_SC_TCQF         = 0xF1,
+    MIDI_SC_SONGPOS      = 0xF2,
+    MIDI_SC_SONGSEL      = 0xF3,
+    MIDI_SC_TUNEREQ      = 0xF6
+};
+
+enum MIDI_SYS_REALTIME {
+    MIDI_SR_CLOCK        = 0xF8,
+    MIDI_SR_START        = 0xFA,
+    MIDI_SR_CONTINUE     = 0xFB,
+    MIDI_SR_STOP         = 0xFC,
+    MIDI_SR_ACTIVE       = 0xFE,
+    MIDI_SR_RESET        = 0xFF
+};
+
+#define MIDI_STATUS_BIT 0x80
+#define MIDI_STATUS_MASK 0xF0
+#define MIDI_SYSRT_BITS  0xF8
+
+struct {
+    int8_t msgStatus;         // Status-code of the current message (0 if none)
+    int8_t msgChannel;        // Destination channel of the current message
+    int8_t msgSize;           // Expected number of data bytes of the current message
+    int8_t msgBufOffs;        // Current offset into the buffer
+    uint8_t msgBuf[16];       // Buffer holding the data bytes for the current message
+    int8_t listenChannel;     // Channel to respond to (0-15, -1 for all)
+
+
+} midirx;
+
 
 struct {
     uint8_t position;           // Position of DFAM's sequencer 0=first step
@@ -48,7 +95,6 @@ led( uint8_t on ) {
     else
         PORTD &= ~(1 << PD6);
 }
-
 
 ISR(TIMER0_OVF_vect)    // tim0 interrupt service routine
 {
@@ -67,19 +113,114 @@ adv_clock() {
 void
 adv_step( uint8_t step ) {
     if( step > 7 ) return;
-    while( dfam.position != step )
-        adv_clock();
+    do { adv_clock(); }
+    while( dfam.position != step );
 }
 
 void
-bttn_held() {
+sw_held() {
     led( 1 );
     adv_step( 3 );
 }
 
 void
-bttn_released() {
+sw_released() {
     led( 0 );
+}
+
+void
+reset() {
+    dfam.position =7; 
+    dfam.running =0;
+}
+
+uint8_t
+midi_dataSize( uint8_t status ) {
+    uint8_t s;
+
+    switch( status ) {
+        case MIDI_ST_NOTEOFF:
+        case MIDI_ST_NOTEON:
+        case MIDI_ST_PPRESSURE:
+        case MIDI_ST_CC:
+        case MIDI_ST_PC:
+        case MIDI_ST_CPRESSURE:
+        case MIDI_ST_PBEND:
+        case MIDI_ST_SYS:
+            s =2;
+    };
+    return s;
+}
+
+void
+midirx_noteOn( uint8_t note, uint8_t velocity ) {
+    // Map the notes C..G in each octave to steps 0..7
+    // Notes G#..B trigger no steps
+    adv_step( note % 12 );
+    led( 1 );
+}
+
+void
+midirx_noteOff( uint8_t note, uint8_t velocity ) {
+    led( 0 );
+}
+
+void
+midirx_msgComplete() {
+    // See if this message is actually for us...
+    if( midirx.msgChannel != midirx.listenChannel 
+     && midirx.listenChannel != -1 ) return;
+
+    switch( midirx.msgStatus ) {
+        case MIDI_ST_NOTEOFF:
+            midirx_noteOff( midirx.msgBuf[0] & 0x7F, midirx.msgBuf[1] & 0x7F );
+            break;
+        case MIDI_ST_NOTEON:
+            if( (midirx.msgBuf[1] & 0x7F) == 0 )
+                midirx_noteOff( midirx.msgBuf[0] & 0x7F, 0 );
+            else    
+                midirx_noteOn( midirx.msgBuf[0] & 0x7F, midirx.msgBuf[1] & 0x7F );
+            break;
+        case MIDI_ST_PPRESSURE:
+            break;
+        case MIDI_ST_CC:
+            break;
+        case MIDI_ST_PC:
+            break;
+        case MIDI_ST_CPRESSURE:
+            break;
+        case MIDI_ST_PBEND:
+            break;
+        case MIDI_ST_SYS:
+            break;
+    };
+
+}
+
+void
+midirx_sysRt( uint8_t data ) {
+
+}
+
+void
+midirx_msg( uint8_t msg ) {
+    if( (msg & MIDI_SYSRT_BITS) == MIDI_SYSRT_BITS ) {
+        // System realtime message
+    } else if( msg & MIDI_STATUS_BIT ) {
+        // Status message / message begin
+        midirx.msgChannel = msg & 0xF;
+        midirx.msgStatus  = (msg & MIDI_STATUS_MASK) >> 4;
+        midirx.msgSize    = midi_dataSize( midirx.msgStatus );
+        midirx.msgBufOffs = 0;
+    } else if( midirx.msgStatus ) {
+        // Data byte
+        midirx.msgBuf[midirx.msgBufOffs++] =msg;
+        if( midirx.msgBufOffs == midirx.msgSize ) {
+            midirx_msgComplete();
+            // Reset for a possible next message with the same status
+            midirx.msgBufOffs =0;
+        }
+    }
 }
 
 void
@@ -117,40 +258,69 @@ setup_io() {
 
 void
 setup_serial() {
+    // Set the BAUD rate (specified at the top)
+    UBRRH =(uint8_t)(BAUD_UBRR >> 8); // High bits
+    UBRRL =(uint8_t)(BAUD_UBRR);      // Low bits
 
+    // Enable receiving only
+    UCSRB =(1 << RXEN);
+
+    // Set the MIDI frame type: 
+    // Asynchronous, one stop bit, eight data bits, one stop bit, no parity bits
+    // UCSRC = 0b00000110
+    UCSRC =(3 << UCSZ0);
 }
 
 void
-reset() {
-    dfam.position =7; 
-    dfam.running =0;
+setup_midi() {
+    // Read the selected MIDI channel from DIPSWITCH3..DIPSWITCH0
+
+    midirx.listenChannel =-1;
+
+    midirx.msgStatus     =0;
+    midirx.msgBufOffs    =0;
+}
+
+void
+poll_sw() {
+    static int sw =1;
+    int rsw;
+    
+    // Poll for changes on SWITCH0 / debounce
+    if( (rsw = PINB & (1<<PB0)) != sw ) {
+        _delay_ms( 20 );
+        if( rsw == (PINB & (1<<PB0)) ) {
+            sw = rsw;
+            if( !sw ) {
+                sw_held();
+            }
+            else {
+                sw_released();
+            }
+        }
+    }
+}
+
+void
+poll_serial() {
+    // Poll for incoming MIDI frames
+    if( UCSRA & (1 << RXC) ) {
+        uint8_t msg = UDR;
+        midirx_msg( msg );
+        //adv_clock();
+    }
 }
 
 int 
 main() {
     setup_io();
     setup_serial();
+    setup_midi();
     reset();
-
-    int bttn =1, rbttn;
 
     sei();
     while(1) { 
-    
-        if( (rbttn = PINB & (1<<PB0)) != bttn ) {
-            _delay_ms( 20 );
-            if( rbttn == (PINB & (1<<PB0)) ) {
-                bttn = rbttn;
-                if( !bttn ) {
-                    bttn_held();
-                }
-                else {
-                    led( 0 );
-                    bttn_released();
-                }
-            }
-        }
-    
+        poll_sw();
+        poll_serial();
     }
-
 }
